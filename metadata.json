@@ -1,0 +1,6 @@
+{
+  "name": "CMU Robotics Lớp 11 - Vibrant STEM & Virtual Robot Simulator",
+  "description": "Nền tảng học tập Robotics CMU Lớp 11 tương tác với robot ảo xe xích, bản đồ vật lý 2D/3D, runtime mô phỏng code, cảm biến LIDAR/khoảng cách, camera POV và 16 mô-đun bài học chuẩn mực.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
