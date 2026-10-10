@@ -17,6 +17,20 @@ import { BottomStatusBar } from './components/BottomStatusBar';
 import { VirtualHardwareLab } from './components/VirtualHardwareLab';
 import { PracticeReportModal } from './components/PracticeReportModal';
 import { generatePracticeReport, PracticeMissionReport } from './simulation/educationalAssessment';
+import { MissionLabManager } from './components/MissionLabManager';
+import {
+  MissionConfig,
+  MissionWaypoint,
+  MissionRunMetrics,
+  MissionStatus,
+  LabAssignment,
+  LabGradingResult,
+} from './types/mission';
+import {
+  BUILT_IN_LAB_ASSIGNMENTS,
+  validateMissionConfig,
+  gradeMissionRun,
+} from './simulation/missionManager';
 
 import { RobotPose, RobotKinematics, DeviceState, SensorData, SafetyState, DEFAULT_ROBOT_CONFIG } from './types/robot';
 import { WorldMap, MapObstacle } from './types/map';
@@ -61,6 +75,7 @@ import {
   Radio,
   FileCode,
   Radar,
+  Flag,
 } from 'lucide-react';
 
 export default function App() {
@@ -180,6 +195,14 @@ export default function App() {
   });
   const [isPickingGoal, setIsPickingGoal] = useState<boolean>(false);
 
+  // Phase 7: Mission Manager & Robotics Lab States
+  const [currentAssignment, setCurrentAssignment] = useState<LabAssignment>(BUILT_IN_LAB_ASSIGNMENTS[0]);
+  const [activeMission, setActiveMission] = useState<MissionConfig>(BUILT_IN_LAB_ASSIGNMENTS[0].missionConfig);
+  const [missionStatus, setMissionStatus] = useState<MissionStatus>('READY');
+  const [missionWaypointIndex, setMissionWaypointIndex] = useState<number>(0);
+  const [missionMetrics, setMissionMetrics] = useState<MissionRunMetrics | null>(null);
+  const [latestGradingResult, setLatestGradingResult] = useState<LabGradingResult | null>(null);
+
   // Command Bus & Runtime Execution
   const [activeCommand, setActiveCommand] = useState<CommandMessage | null>(null);
   const [code, setCode] = useState<string>(`# Kịch bản mẫu: Chạy thẳng và xoay tìm AprilTag 0
@@ -251,6 +274,7 @@ print("Hoàn thành kịch bản!")`);
       angularSpeedRadps: 0,
     }));
     setAutoNavState(prev => (prev.status === 'TRACKING' ? { ...prev, status: 'ESTOP' } : prev));
+    setMissionStatus(prev => (prev === 'RUNNING' ? 'ESTOP_ABORTED' : prev));
     logEvent('estop_triggered', 'Nút Dừng Khẩn Cấp (E-STOP) được kích hoạt!', 'error', 'USER');
     logConsole('⚠️ E-STOP kích hoạt! Toàn bộ động cơ bị khóa.', 'error');
   };
@@ -262,6 +286,7 @@ print("Hoàn thành kịch bản!")`);
       reason: undefined,
     }));
     setAutoNavState(prev => (prev.status === 'ESTOP' ? { ...prev, status: 'IDLE', plannedPath: null, activeGoal: null } : prev));
+    setMissionStatus(prev => (prev === 'ESTOP_ABORTED' ? 'READY' : prev));
     logEvent('estop_reset', 'E-STOP đã được đặt lại an toàn.', 'success', 'USER');
     logConsole('✓ E-STOP đã được gỡ bỏ.', 'info');
   };
@@ -394,8 +419,13 @@ print("Hoàn thành kịch bản!")`);
     setIsPickingGoal(false);
     setPathHistory([]);
     setSelectedObstacleId(null);
+
+    // Phase 7: Safely abort any active mission on map change
+    setMissionStatus('MAP_ABORTED');
+    setMissionWaypointIndex(0);
+
     logEvent('map_loaded', `Đã chuyển sang bản đồ "${newMap.name}"`, 'info', 'SYSTEM');
-    logConsole(`Đã nạp bản đồ "${newMap.name}".`, 'info');
+    logConsole(`Đã nạp bản đồ "${newMap.name}". Nhiệm vụ trên bản đồ cũ đã được hủy an toàn.`, 'info');
   };
 
   // Set Autonomous Navigation Goal
@@ -454,6 +484,122 @@ print("Hoàn thành kịch bản!")`);
     });
     logConsole('🛑 [AutoNav] Đã dừng và hủy lộ trình điều hướng tự hành.', 'info');
   }, [simTimeS, logConsole]);
+
+  // Phase 7: Mission Lifecycle Handlers
+  const handleStartMission = useCallback((config: MissionConfig) => {
+    const valResult = validateMissionConfig(config, currentMap);
+    if (!valResult.isValid) {
+      logConsole(`❌ [Mission] Cấu hình nhiệm vụ không hợp lệ:\n${valResult.errors.join('\n')}`, 'error');
+      logEvent('runtime_error', 'Nhiệm vụ bị từ chối do waypoint không an toàn', 'error');
+      return;
+    }
+
+    setActiveMission(config);
+    setMissionWaypointIndex(0);
+    setMissionStatus('RUNNING');
+
+    // Initialize metrics
+    const newMetrics: MissionRunMetrics = {
+      runId: `RUN_${Date.now()}`,
+      missionId: config.id,
+      status: 'RUNNING',
+      startTimeSimS: simTimeS,
+      endTimeSimS: simTimeS,
+      elapsedSimTimeS: 0,
+      totalDistanceM: 0,
+      plannedDistanceM: valResult.totalEstimatedPathM,
+      crossTrackErrors: [],
+      averageCrossTrackErrorM: 0,
+      maxCrossTrackErrorM: 0,
+      finalGoalDistanceM: 0,
+      collisionCount: 0,
+      replanCount: 0,
+      estopCount: 0,
+      sensorFaultCount: 0,
+      completedWaypointsCount: 0,
+      totalWaypointsCount: config.waypoints.length,
+      historySnapshots: [],
+    };
+    setMissionMetrics(newMetrics);
+
+    // Target first waypoint
+    const firstWp = config.waypoints[0];
+    if (firstWp) {
+      const path = planPathAStar({ xM: pose.xM, zM: pose.zM }, firstWp, currentMap, simTimeS);
+      if (path) {
+        setAutoNavState({
+          status: 'TRACKING',
+          activeGoal: {
+            id: firstWp.id,
+            xM: firstWp.xM,
+            zM: firstWp.zM,
+            toleranceM: firstWp.toleranceM || 0.12,
+            name: firstWp.name,
+          },
+          plannedPath: path,
+          currentPathIndex: 0,
+          lookaheadPoint: path.waypoints[1] || path.waypoints[0],
+          distanceToGoalM: path.totalLengthM,
+          crossTrackErrorM: 0,
+          replanCount: 0,
+        });
+        setSimulationStatus('running');
+        logConsole(`🚩 [Mission] Khởi chạy nhiệm vụ "${config.title}". Đang tiến tới #${firstWp.order}: ${firstWp.name}...`, 'info');
+        logEvent('command_accepted', `Khởi chạy nhiệm vụ "${config.title}"`, 'success');
+      } else {
+        setMissionStatus('FAILED_OBSTACLE');
+        logConsole('❌ [Mission] Không tìm thấy đường đi tới Waypoint 1!', 'error');
+      }
+    }
+  }, [currentMap, simTimeS, pose, logConsole, logEvent]);
+
+  const handlePauseMission = useCallback(() => {
+    setMissionStatus('PAUSED');
+    handlePause();
+    logConsole('⏸️ [Mission] Đã tạm dừng nhiệm vụ.', 'info');
+  }, [handlePause, logConsole]);
+
+  const handleResumeMission = useCallback(() => {
+    setMissionStatus('RUNNING');
+    handlePlay();
+    logConsole('▶️ [Mission] Tiếp tục thực thi nhiệm vụ.', 'info');
+  }, [handlePlay, logConsole]);
+
+  const handleStopMission = useCallback(() => {
+    setMissionStatus('READY');
+    handleStop();
+    handleCancelNav();
+    logConsole('⏹️ [Mission] Đã dừng nhiệm vụ.', 'info');
+  }, [handleStop, handleCancelNav, logConsole]);
+
+  const handleResetMission = useCallback(() => {
+    handleStopMission();
+    if (activeMission) {
+      setPose({
+        xM: activeMission.spawnPose.xM,
+        yM: 0,
+        zM: activeMission.spawnPose.zM,
+        yawRad: activeMission.spawnPose.yawRad,
+      });
+      setMissionWaypointIndex(0);
+      setMissionStatus('READY');
+      logConsole(`🔄 [Mission] Đã đặt lại robot về vị trí xuất phát (${activeMission.spawnPose.xM}, ${activeMission.spawnPose.zM})m.`, 'info');
+    }
+  }, [handleStopMission, activeMission, logConsole]);
+
+  const handleSelectAssignment = useCallback((assignment: LabAssignment) => {
+    setCurrentAssignment(assignment);
+    setActiveMission(assignment.missionConfig);
+    setMissionWaypointIndex(0);
+    setMissionStatus('READY');
+
+    // Switch to recommended map if different
+    const targetMap = BUILT_IN_MAPS.find(m => m.id === assignment.recommendedMapId);
+    if (targetMap && targetMap.id !== currentMap.id) {
+      handleSelectMap(targetMap);
+    }
+    logConsole(`📚 [Lab] Đã nạp bài thực hành: [${assignment.id}] ${assignment.title}`, 'info');
+  }, [currentMap.id, handleSelectMap, logConsole]);
 
   const handleAcknowledgeSensorFault = useCallback(() => {
     setAutoNavState(prev => {
@@ -628,18 +774,95 @@ print("Hoàn thành kịch bản!")`);
           if (pp.isGoalReached) {
             cmdLeft = 0;
             cmdRight = 0;
-            setAutoNavState(prev => ({ ...prev, status: 'GOAL_REACHED', lookaheadPoint: null }));
-            logConsole('🏁 [AutoNav] Robot đã đến điểm đích an toàn!', 'info');
-            logEvent('waypoint_reached', 'Đã đến điểm đích thành công!', 'success');
+
+            // Check if this is part of an active multi-waypoint mission
+            if (missionStatus === 'RUNNING' && activeMission) {
+              const currentWp = activeMission.waypoints[missionWaypointIndex];
+              const nextIdx = missionWaypointIndex + 1;
+
+              logConsole(`🏁 [Mission] Đã đến waypoint #${currentWp?.order}: ${currentWp?.name}!`, 'info');
+              logEvent('waypoint_reached', `Hoàn thành trạm ${currentWp?.name}`, 'success');
+
+              if (nextIdx < activeMission.waypoints.length) {
+                // Transition to next waypoint
+                setMissionWaypointIndex(nextIdx);
+                const nextWp = activeMission.waypoints[nextIdx];
+                const nextPath = planPathAStar({ xM: pose.xM, zM: pose.zM }, nextWp, currentMap, simTimeS);
+                if (nextPath) {
+                  setAutoNavState({
+                    status: 'TRACKING',
+                    activeGoal: {
+                      id: nextWp.id,
+                      xM: nextWp.xM,
+                      zM: nextWp.zM,
+                      toleranceM: nextWp.toleranceM || 0.12,
+                      name: nextWp.name,
+                    },
+                    plannedPath: nextPath,
+                    currentPathIndex: 0,
+                    lookaheadPoint: nextPath.waypoints[1] || nextPath.waypoints[0],
+                    distanceToGoalM: nextPath.totalLengthM,
+                    crossTrackErrorM: 0,
+                    replanCount: 0,
+                  });
+                  logConsole(`➡️ [Mission] Đang chuyển tiếp tới #${nextWp.order}: ${nextWp.name}...`, 'info');
+                } else {
+                  setMissionStatus('FAILED_OBSTACLE');
+                  setAutoNavState(prev => ({ ...prev, status: 'OBSTACLE_BLOCKED' }));
+                  logConsole(`❌ [Mission] Không tìm thấy đường đi tới Waypoint #${nextWp.order}!`, 'error');
+                }
+              } else {
+                // All waypoints completed!
+                setMissionStatus('COMPLETED');
+                setAutoNavState(prev => ({ ...prev, status: 'GOAL_REACHED', lookaheadPoint: null }));
+                logConsole(`🎉 [Mission] Chúc mừng! Đã hoàn thành 100% nhiệm vụ "${activeMission.title}"!`, 'info');
+                logEvent('waypoint_reached', `Hoàn thành xuất sắc toàn bộ nhiệm vụ "${activeMission.title}"!`, 'success');
+
+                // Finalize metrics & grade
+                if (missionMetrics) {
+                  const finalMetrics: MissionRunMetrics = {
+                    ...missionMetrics,
+                    status: 'COMPLETED',
+                    endTimeSimS: simTimeS,
+                    elapsedSimTimeS: simTimeS - missionMetrics.startTimeSimS,
+                    totalDistanceM: odometry.totalDistanceM,
+                    completedWaypointsCount: activeMission.waypoints.length,
+                    averageCrossTrackErrorM:
+                      missionMetrics.crossTrackErrors.length > 0
+                        ? missionMetrics.crossTrackErrors.reduce((a, b) => a + b, 0) / missionMetrics.crossTrackErrors.length
+                        : 0.02,
+                    finalGoalDistanceM: Math.hypot(
+                      (currentWp?.xM || 0) - pose.xM,
+                      (currentWp?.zM || 0) - pose.zM
+                    ),
+                  };
+                  setMissionMetrics(finalMetrics);
+                  if (currentAssignment) {
+                    const grading = gradeMissionRun(currentAssignment, finalMetrics);
+                    setLatestGradingResult(grading);
+                  }
+                }
+              }
+            } else {
+              setAutoNavState(prev => ({ ...prev, status: 'GOAL_REACHED', lookaheadPoint: null }));
+              logConsole('🏁 [AutoNav] Robot đã đến điểm đích an toàn!', 'info');
+              logEvent('waypoint_reached', 'Đã đến điểm đích thành công!', 'success');
+            }
           } else if (isPathObstructed(autoNavState.plannedPath, currentMap, simTimeS)) {
             logConsole('⚠️ [AutoNav] Phát hiện chướng ngại vật cắt ngang, đang tính lại đường né...', 'warn');
             const newPath = planPathAStar({ xM: pose.xM, zM: pose.zM }, autoNavState.activeGoal!, currentMap, simTimeS);
             if (newPath) {
               setAutoNavState(prev => ({ ...prev, plannedPath: newPath, replanCount: prev.replanCount + 1 }));
+              if (missionMetrics) {
+                setMissionMetrics(m => m ? ({ ...m, replanCount: m.replanCount + 1 }) : null);
+              }
             } else {
               cmdLeft = 0;
               cmdRight = 0;
               setAutoNavState(prev => ({ ...prev, status: 'OBSTACLE_BLOCKED' }));
+              if (missionStatus === 'RUNNING') {
+                setMissionStatus('FAILED_OBSTACLE');
+              }
               logConsole('❌ [AutoNav] Quỹ đạo bị chặn đứng bởi chướng ngại vật!', 'error');
             }
           } else {
@@ -686,6 +909,24 @@ print("Hoàn thành kịch bản!")`);
       // Cancel auto-nav tracking on E-STOP
       if (physicsResult.safety.isEmergencyStopped && autoNavState.status === 'TRACKING') {
         setAutoNavState(prev => ({ ...prev, status: 'ESTOP' }));
+      }
+
+      // Update active mission metrics during execution
+      if (missionStatus === 'RUNNING') {
+        setMissionMetrics(m => {
+          if (!m) return null;
+          const isCol = physicsResult.safety.isCollision;
+          const newErrors = autoNavState.crossTrackErrorM !== undefined
+            ? [...m.crossTrackErrors.slice(-100), Math.abs(autoNavState.crossTrackErrorM)]
+            : m.crossTrackErrors;
+          return {
+            ...m,
+            elapsedSimTimeS: simTimeS - m.startTimeSimS,
+            collisionCount: isCol ? m.collisionCount + 1 : m.collisionCount,
+            crossTrackErrors: newErrors,
+            maxCrossTrackErrorM: Math.max(m.maxCrossTrackErrorM, Math.abs(autoNavState.crossTrackErrorM || 0)),
+          };
+        });
       }
 
       // Update dead-reckoning odometry
@@ -816,6 +1057,28 @@ print("Hoàn thành kịch bản!")`);
                       {isRightPanelCollapsed ? <PanelRightOpen className="w-4 h-4 text-blue-500" /> : <PanelRightClose className="w-4 h-4" />}
                     </button>
                   </div>
+
+                  {/* Multi-Waypoint Mission & Robotics Lab Manager Panel */}
+                  <MissionLabManager
+                    currentMap={currentMap}
+                    activeMission={activeMission}
+                    missionStatus={missionStatus}
+                    currentWaypointIdx={missionWaypointIndex}
+                    missionMetrics={missionMetrics}
+                    onStartMission={handleStartMission}
+                    onPauseMission={handlePauseMission}
+                    onResumeMission={handleResumeMission}
+                    onStopMission={handleStopMission}
+                    onResetMission={handleResetMission}
+                    onUpdateMissionConfig={config => setActiveMission(config)}
+                    labAssignments={BUILT_IN_LAB_ASSIGNMENTS}
+                    currentAssignment={currentAssignment}
+                    onSelectAssignment={handleSelectAssignment}
+                    latestGradingResult={latestGradingResult}
+                    onExportReport={() => setIsReportModalOpen(true)}
+                    onOpenReportModal={() => setIsReportModalOpen(true)}
+                    isDarkMode={isDarkMode}
+                  />
 
                   {/* Manual Teleop & Playback Control Deck Toolbar */}
                   <ControlDeck
@@ -1188,6 +1451,51 @@ print("Hoàn thành kịch bản!")`);
               </div>
             </div>
           )}
+          {/* VIEW 11: Dedicated Mission Lab View */}
+          {currentTarget === 'mission_lab' && (
+            <div className="p-4 sm:p-6 flex flex-col gap-4 max-w-6xl mx-auto w-full">
+              <div className={`p-4 rounded-xl border flex items-center justify-between ${
+                isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'
+              }`}>
+                <div>
+                  <h2 className="text-base font-bold flex items-center gap-2">
+                    <Flag className="w-5 h-5 text-amber-500" />
+                    Quản Lý Nhiệm Vụ Phức Hợp & Phòng Thực Hành CMU Robotics Lab
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Lập lộ trình đa waypoint, kiểm tra tiền chuyến bay, giám sát thực thi và tự động chấm điểm theo rubric sư phạm
+                  </p>
+                </div>
+                <button
+                  onClick={() => setCurrentTarget('simulator')}
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold cursor-pointer"
+                >
+                  Xem Trên Sa Bàn Mô Phỏng
+                </button>
+              </div>
+
+              <MissionLabManager
+                currentMap={currentMap}
+                activeMission={activeMission}
+                missionStatus={missionStatus}
+                currentWaypointIdx={missionWaypointIndex}
+                missionMetrics={missionMetrics}
+                onStartMission={handleStartMission}
+                onPauseMission={handlePauseMission}
+                onResumeMission={handleResumeMission}
+                onStopMission={handleStopMission}
+                onResetMission={handleResetMission}
+                onUpdateMissionConfig={config => setActiveMission(config)}
+                labAssignments={BUILT_IN_LAB_ASSIGNMENTS}
+                currentAssignment={currentAssignment}
+                onSelectAssignment={handleSelectAssignment}
+                latestGradingResult={latestGradingResult}
+                onExportReport={() => setIsReportModalOpen(true)}
+                onOpenReportModal={() => setIsReportModalOpen(true)}
+                isDarkMode={isDarkMode}
+              />
+            </div>
+          )}
         </main>
       </div>
 
@@ -1245,6 +1553,7 @@ print("Hoàn thành kịch bản!")`);
         isOpen={isReportModalOpen}
         onClose={() => setIsReportModalOpen(false)}
         report={practiceReport}
+        labGrading={latestGradingResult}
       />
     </div>
   );

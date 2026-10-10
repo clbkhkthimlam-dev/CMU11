@@ -39,10 +39,10 @@ export const TestRunnerModal: React.FC<TestRunnerModalProps> = ({ isOpen, onClos
             </div>
             <div>
               <h3 className="text-base font-bold text-slate-900">
-                Bộ Kiểm Thử Toàn Diện & Chuẩn Hóa CMU10 (50 QA Tests T01 - T50)
+                Bộ Kiểm Thử Toàn Diện & Chuẩn Hóa CMU10 (60 QA Tests T01 - T60)
               </h3>
               <p className="text-xs text-slate-500">
-                Kiểm chứng toàn vẹn: Động học, Va chạm SAT, LiDAR 360°, AprilTag, Odometry, Occupancy Grid, A* Planner, Pure Pursuit, Kịch bản tự hành (T01-T40) và Độ bền 90,000 chu kỳ, Benchmark hiệu năng, An toàn & Sư phạm (T41-T50).
+                Kiểm chứng toàn vẹn: Động học, Va chạm SAT, LiDAR 360°, AprilTag, Odometry, Occupancy Grid, A* Planner, Pure Pursuit, Kịch bản tự hành (T01-T40), Độ bền & Benchmark (T41-T50) và Nhiệm vụ Đa Waypoint, Lab Quản Lý & Chấm Điểm Sư Phạm (T51-T60).
               </p>
             </div>
           </div>
@@ -67,7 +67,7 @@ export const TestRunnerModal: React.FC<TestRunnerModalProps> = ({ isOpen, onClos
             ) : (
               <Play className="w-4 h-4" />
             )}
-            <span>{isRunning ? 'Đang Chạy Kiểm Thử...' : 'Chạy Toàn Bộ 50 Bài Test Nghiệm Thu (T01 - T50)'}</span>
+            <span>{isRunning ? 'Đang Chạy Kiểm Thử...' : 'Chạy Toàn Bộ 60 Bài Test Nghiệm Thu (T01 - T60)'}</span>
           </button>
 
           {testResults.length > 0 && (

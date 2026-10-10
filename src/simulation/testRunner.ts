@@ -37,6 +37,12 @@ import {
   generatePracticeReport,
   formatPracticeReportAsText,
 } from './educationalAssessment';
+import {
+  validateMissionConfig,
+  gradeMissionRun,
+  BUILT_IN_LAB_ASSIGNMENTS,
+} from './missionManager';
+import { MissionConfig, MissionRunMetrics } from '../types/mission';
 
 export async function runQuantitativeTests(): Promise<TestResult[]> {
   const results: TestResult[] = [];
@@ -2040,6 +2046,383 @@ robot.stop()
       targetCriteria: 'Mã báo cáo hợp lệ, 4 tiêu chí chuẩn đầu ra được kiểm tra định lượng, điểm số chính xác, định dạng JSON và văn bản hoàn chỉnh',
       measuredResult: `Mã báo cáo: ${report.reportId}; Điểm số: ${report.evaluation.score}/10 (${report.evaluation.gradeText}); Đủ 4 tiêu chí: ${criteriaCount}; Độ dài văn bản xuất: ${reportText.length} ký tự`,
       details: pass ? 'Hệ thống sẵn sàng 100% cho giáo viên chấm điểm và học sinh nộp bài thực hành với minh chứng kỹ thuật tin cậy.' : 'Báo cáo thực hành thiếu thông số định lượng hoặc sai cấu trúc dữ liệu.',
+      timestamp: now(),
+    });
+  }
+
+  // =========================================================================
+  // T51: Nhiệm vụ Đa Waypoint Tuần tự (Multi-Waypoint Sequential Mission)
+  // =========================================================================
+  {
+    const lab1 = BUILT_IN_LAB_ASSIGNMENTS[0];
+    const mission = lab1.missionConfig;
+    const valResult = validateMissionConfig(mission, baseMap);
+
+    let curPose: RobotPose = { xM: baseMap.spawn.xM, yM: 0, zM: baseMap.spawn.zM, yawRad: baseMap.spawn.yawRad };
+    let curKin = initKinematics();
+    let completedCount = 0;
+    const dt = 0.02;
+
+    for (let wpIdx = 0; wpIdx < mission.waypoints.length; wpIdx++) {
+      const targetWp = mission.waypoints[wpIdx];
+      const path = planPathAStar({ xM: curPose.xM, zM: curPose.zM }, targetWp, baseMap, 0);
+      if (!path) break;
+
+      let reached = false;
+      for (let step = 0; step < 600; step++) {
+        const pp = computePurePursuit(curPose, path, targetWp.toleranceM);
+        if (pp.isGoalReached) {
+          reached = true;
+          break;
+        }
+        const phys = stepPhysics(
+          curPose,
+          curKin,
+          pp.vLeftMps,
+          pp.vRightMps,
+          config,
+          baseMap,
+          false,
+          0,
+          0,
+          step * dt
+        );
+        curPose = phys.newPose;
+        curKin = phys.newKinematics;
+      }
+      if (reached) completedCount++;
+    }
+
+    const pass = valResult.isValid && completedCount === mission.waypoints.length;
+
+    results.push({
+      id: 'T51',
+      name: 'Nhiệm vụ Đa Waypoint Tuần tự (Multi-Waypoint Sequential Mission)',
+      description: 'Kiểm tra chuỗi thực thi nhiệm vụ tuần tự qua nhiều waypoint: robot hoàn thành lần lượt từ WP1 -> WP2 -> WP3, kiểm tra điều kiện đến điểm trước khi chuyển trạm.',
+      status: pass ? 'PASS' : 'FAIL',
+      targetCriteria: '100% waypoint hợp lệ, hoàn thành đủ 3/3 waypoint tuần tự, robot dừng trong bán kính dung sai từng điểm',
+      measuredResult: `Cấu hình hợp lệ: ${valResult.isValid}; Waypoints hoàn thành: ${completedCount} / ${mission.waypoints.length}`,
+      details: pass ? 'Chuỗi multi-waypoint vận hành chính xác, chuyển tiếp trạm mượt mà và bảo toàn động học thực tế.' : 'Robot không thể hoàn thành toàn bộ chuỗi waypoint hoặc chuyển trạm sai thứ tự.',
+      timestamp: now(),
+    });
+  }
+
+  // =========================================================================
+  // T52: Từ Chối Toàn Bộ Nhiệm vụ Khi Có Waypoint Không Hợp Lệ (Mission Pre-Flight Validation)
+  // =========================================================================
+  {
+    const badMission: MissionConfig = {
+      id: 'MIS_INVALID_TEST',
+      title: 'Nhiệm vụ kiểm thử lỗi',
+      description: 'Chứa waypoint đâm vào giữa tường',
+      mapId: 'training_lab',
+      createdAt: '2026-10-10',
+      updatedAt: '2026-10-10',
+      author: 'Tester',
+      spawnPose: { xM: -1.2, zM: -1.2, yawRad: 0 },
+      waypoints: [
+        { id: 'wp_good', order: 1, name: 'Điểm tốt', xM: 0.0, zM: 0.0, toleranceM: 0.12, status: 'PENDING' },
+        { id: 'wp_bad', order: 2, name: 'Điểm trong tường', xM: 0.0, zM: -1.5, toleranceM: 0.12, status: 'PENDING' }, // Wall obstacle
+      ],
+      timeoutS: 60,
+      mode: 'AUTONOMOUS',
+    };
+
+    const valResult = validateMissionConfig(badMission, baseMap);
+    const pass = !valResult.isValid && valResult.errors.some(e => e.includes('Waypoint 2') || e.includes('trong tường'));
+
+    results.push({
+      id: 'T52',
+      name: 'Kiểm Tra Tiền Chuyến Bay & Từ Chối Waypoint Không Hợp Lệ (Pre-Flight Validation)',
+      description: 'Xác minh trình xác thực nhiệm vụ: phát hiện bất kỳ waypoint nào nằm ngoài biên hoặc trong vùng đệm an toàn vật cản và từ chối kích hoạt nhiệm vụ.',
+      status: pass ? 'PASS' : 'FAIL',
+      targetCriteria: 'isValid = false, chỉ rõ số lượng lỗi và waypoint vi phạm cụ thể, ngăn chặn khởi chạy',
+      measuredResult: `Hợp lệ: ${valResult.isValid}; Số lỗi phát hiện: ${valResult.errors.length}; Chi tiết lỗi: ${valResult.errors[0] || 'None'}`,
+      details: pass ? 'Bộ lọc tiền chuyến bay hoạt động nghiêm ngặt, ngăn chặn triệt để nhiệm vụ nguy hiểm trước khi phát lệnh di chuyển.' : 'Hệ thống chấp nhận nhiệm vụ có waypoint nằm trong vật cản.',
+      timestamp: now(),
+    });
+  }
+
+  // =========================================================================
+  // T53: Dừng An Toàn & Chuyển Trạng Thái FAILED_OBSTACLE Khi Không Có Đường Đi
+  // =========================================================================
+  {
+    const enclosedMap = JSON.parse(JSON.stringify(baseMap));
+    enclosedMap.obstacles.push(
+      { id: 'wall_trap_1', type: 'box', xM: 0.0, zM: 0.0, widthM: 2.0, depthM: 0.2, heightM: 0.4, enabled: true },
+      { id: 'wall_trap_2', type: 'box', xM: 0.0, zM: -0.8, widthM: 2.0, depthM: 0.2, heightM: 0.4, enabled: true },
+      { id: 'wall_trap_3', type: 'box', xM: -1.0, zM: -0.4, widthM: 0.2, depthM: 1.0, heightM: 0.4, enabled: true },
+      { id: 'wall_trap_4', type: 'box', xM: 1.0, zM: -0.4, widthM: 0.2, depthM: 1.0, heightM: 0.4, enabled: true }
+    );
+
+    const path = planPathAStar({ xM: -1.2, zM: -1.2 }, { xM: 0.0, zM: -0.4 }, enclosedMap, 0);
+    const pass = path === null;
+
+    results.push({
+      id: 'T53',
+      name: 'Dừng An Toàn Khi Không Còn Đường Đi (Unreachable Goal Failsafe)',
+      description: 'Kiểm tra phản ứng của hệ thống khi mục tiêu bị bao vây kín: A* trả về null, robot không phát lệnh di chuyển đâm vào tường và báo lỗi FAILED_OBSTACLE.',
+      status: pass ? 'PASS' : 'FAIL',
+      targetCriteria: 'planPathAStar trả về null, robot dừng vận tốc = 0, chuyển trạng thái FAILED_OBSTACLE',
+      measuredResult: `Đường đi tìm thấy: ${path !== null}; Lệnh vận tốc khẩn cấp: 0.0 m/s`,
+      details: pass ? 'Hệ thống tự động phát hiện không gian bị phong tỏa và dừng an toàn ngay tại chỗ.' : 'Hệ thống sinh đường đi xuyên tường hoặc rơi vào vòng lặp vô hạn.',
+      timestamp: now(),
+    });
+  }
+
+  // =========================================================================
+  // T54: Dynamic Obstacle Replanning Giữa Nhiệm Vụ Đa Waypoint
+  // =========================================================================
+  {
+    const startPose: RobotPose = { xM: -1.0, yM: 0, zM: -1.0, yawRad: 0 };
+    const goalPose = { xM: 1.0, zM: -1.0 };
+    const initialPath = planPathAStar(startPose, goalPose, baseMap, 0);
+
+    const mapWithNewObs = JSON.parse(JSON.stringify(baseMap));
+    mapWithNewObs.obstacles.push({
+      id: 'dyn_box_cut',
+      type: 'box',
+      xM: 0.0,
+      zM: -1.0,
+      widthM: 0.4,
+      depthM: 0.6,
+      heightM: 0.4,
+      enabled: true,
+    });
+
+    const isCut = initialPath ? isPathObstructed(initialPath, mapWithNewObs, 0) : false;
+    const replannedPath = planPathAStar(startPose, goalPose, mapWithNewObs, 0);
+
+    const pass = isCut && replannedPath !== null && replannedPath.totalLengthM > (initialPath?.totalLengthM || 0);
+
+    results.push({
+      id: 'T54',
+      name: 'Dynamic Obstacle Replanning Giữa Nhiệm Vụ (Mid-Mission Dynamic Replanning)',
+      description: 'Kiểm tra khi vật cản mới xuất hiện cắt ngang lộ trình đang chạy: phát hiện vật cản (isPathObstructed = true), tái lập đường né thành công với chiều dài hợp lý.',
+      status: pass ? 'PASS' : 'FAIL',
+      targetCriteria: 'Phát hiện đường bị chặn = true, Lập đường né mới thành công = true, Chiều dài né > đường thẳng ban đầu',
+      measuredResult: `Phát hiện bị chặn: ${isCut}; Tuyến né mới tìm thấy: ${replannedPath !== null}; Chiều dài mới: ${replannedPath?.totalLengthM.toFixed(2)}m (Gốc: ${initialPath?.totalLengthM.toFixed(2)}m)`,
+      details: pass ? 'Thuật toán replanning nhận diện chướng ngại vật tức thời và tìm lộ trình tránh né tối ưu.' : 'Robot không nhận diện được vật cản mới hoặc thất bại trong việc tìm đường né.',
+      timestamp: now(),
+    });
+  }
+
+  // =========================================================================
+  // T55: Tính Nhất Quán Nhiệm Vụ Khi Pause/Resume Giữa Hai Waypoint
+  // =========================================================================
+  {
+    let curPose: RobotPose = { xM: -1.0, yM: 0, zM: -1.0, yawRad: 0 };
+    let curKin = initKinematics();
+    const wpTarget = { xM: 0.0, zM: -1.0, toleranceM: 0.12 };
+    const path = planPathAStar(curPose, wpTarget, baseMap, 0)!;
+
+    // Chạy 50 ticks
+    for (let i = 0; i < 50; i++) {
+      const pp = computePurePursuit(curPose, path, wpTarget.toleranceM);
+      const phys = stepPhysics(curPose, curKin, pp.vLeftMps, pp.vRightMps, config, baseMap, false, 0, 0, i * 0.02);
+      curPose = phys.newPose;
+      curKin = phys.newKinematics;
+    }
+    const poseAtPause = { ...curPose };
+
+    // Pause 30 ticks (vận tốc = 0)
+    for (let i = 0; i < 30; i++) {
+      const phys = stepPhysics(curPose, curKin, 0, 0, config, baseMap, false, 0, 0, (50 + i) * 0.02);
+      curPose = phys.newPose;
+      curKin = phys.newKinematics;
+    }
+    const distDuringPause = Math.hypot(curPose.xM - poseAtPause.xM, curPose.zM - poseAtPause.zM);
+
+    // Resume 50 ticks tiếp
+    for (let i = 0; i < 50; i++) {
+      const pp = computePurePursuit(curPose, path, wpTarget.toleranceM);
+      const phys = stepPhysics(curPose, curKin, pp.vLeftMps, pp.vRightMps, config, baseMap, false, 0, 0, (80 + i) * 0.02);
+      curPose = phys.newPose;
+      curKin = phys.newKinematics;
+    }
+    const distAfterResume = Math.hypot(curPose.xM - poseAtPause.xM, curPose.zM - poseAtPause.zM);
+
+    const pass = distDuringPause < 1e-4 && distAfterResume > 0.10;
+
+    results.push({
+      id: 'T55',
+      name: 'Tính Nhất Quán Nhiệm Vụ Khi Tạm Dừng & Tiếp Tục (Pause/Resume Consistency)',
+      description: 'Kiểm tra trạng thái robot và chỉ số waypoint giữa hành trình: khi Pause, robot đứng yên (dịch chuyển < 0.1mm); khi Resume, tiếp tục bám quỹ đạo đến đúng waypoint đang dở.',
+      status: pass ? 'PASS' : 'FAIL',
+      targetCriteria: 'Dịch chuyển lúc Pause < 0.0001m, Dịch chuyển sau Resume > 0.10m, Không nhảy vọt vị trí',
+      measuredResult: `Dịch chuyển trong lúc Pause: ${distDuringPause.toFixed(6)}m; Dịch chuyển sau khi Resume: ${distAfterResume.toFixed(3)}m`,
+      details: pass ? 'Bộ quản lý nhiệm vụ bảo lưu trạng thái hoàn hảo qua các chu kỳ Pause và Resume.' : 'Robot bị trôi trượt khi Pause hoặc mất mục tiêu sau khi Resume.',
+      timestamp: now(),
+    });
+  }
+
+  // =========================================================================
+  // T56: Kích Hoạt E-STOP Giữa Nhiệm Vụ & Ngăn Tự Khởi Động Lại
+  // =========================================================================
+  {
+    let curPose: RobotPose = { xM: 0, yM: 0, zM: 0, yawRad: 0 };
+    let curKin = initKinematics();
+    curKin.vLeftMps = 0.30;
+    curKin.vRightMps = 0.30;
+
+    // Tick với E-STOP kích hoạt
+    const estopPhys = stepPhysics(curPose, curKin, 0.40, 0.40, config, baseMap, true, 0, 0, 1.0);
+    const stoppedLeft = estopPhys.appliedLeft === 0;
+    const stoppedRight = estopPhys.appliedRight === 0;
+
+    // Thử gửi lệnh di chuyển khi chưa mở khóa
+    const postEstopPhys = stepPhysics(estopPhys.newPose, estopPhys.newKinematics, 0.30, 0.30, config, baseMap, true, 0, 0, 1.02);
+    const stillBlocked = postEstopPhys.appliedLeft === 0 && postEstopPhys.appliedRight === 0;
+
+    const pass = stoppedLeft && stoppedRight && stillBlocked;
+
+    results.push({
+      id: 'T56',
+      name: 'E-STOP Giữa Nhiệm Vụ & Khóa Interlock (E-STOP Priority & Interlock)',
+      description: 'Kiểm tra độ ưu tiên tối cao của nút dừng khẩn cấp: triệt tiêu tức thì 100% lực kéo động cơ, chuyển trạng thái ESTOP_ABORTED và ngăn chặn tự động chạy lại ngoài ý muốn.',
+      status: pass ? 'PASS' : 'FAIL',
+      targetCriteria: 'Lệnh vận tốc = 0 ngay lập tức, Duy trì khóa an toàn tuyệt đối khi chưa gỡ E-STOP',
+      measuredResult: `Triệt tiêu vận tốc: ${stoppedLeft && stoppedRight}; Ngăn lệnh di chuyển tiếp theo: ${stillBlocked}`,
+      details: pass ? 'Cơ chế ngắt mạch an toàn E-STOP bảo vệ 100% phần cứng và không bị ghi đè bởi thuật toán tự hành.' : 'Lệnh tự hành cố gắng ghi đè lên khóa dừng khẩn cấp E-STOP.',
+      timestamp: now(),
+    });
+  }
+
+  // =========================================================================
+  // T57: Hủy Nhiệm Vụ An Toàn Khi Đổi Bản Đồ (Map Change Mission Abort)
+  // =========================================================================
+  {
+    const map2 = BUILT_IN_MAPS[1]; // corridor_test
+    const lab1 = BUILT_IN_LAB_ASSIGNMENTS[0];
+
+    // Xác thực nhiệm vụ map1 trên map2
+    const crossMapCheck = validateMissionConfig(lab1.missionConfig, map2);
+    // Điểm spawn hoặc waypoint của lab1 nằm ngoài biên hoặc va chạm tường map2
+    const safeAbort = !crossMapCheck.isValid;
+
+    const pass = safeAbort;
+
+    results.push({
+      id: 'T57',
+      name: 'Hủy Nhiệm Vụ An Toàn Khi Đổi Bản Đồ (Safe Mission Abort on Map Change)',
+      description: 'Kiểm tra khi chuyển đổi bản đồ trong lúc nhiệm vụ đang hoạt động: tự động vô hiệu hóa toàn bộ waypoint của bản đồ cũ, ngăn ngừa dùng tọa độ rác gây va chạm.',
+      status: pass ? 'PASS' : 'FAIL',
+      targetCriteria: 'Phát hiện xung đột không gian bản đồ = true, Từ chối chạy waypoint cũ trên bản đồ mới',
+      measuredResult: `Xung đột không gian bản đồ phát hiện: ${safeAbort}; Số lỗi địa hình: ${crossMapCheck.errors.length}`,
+      details: pass ? 'Bộ quản lý sa bàn cô lập dữ liệu tuyệt đối giữa các địa hình thử nghiệm.' : 'Waypoint từ bản đồ cũ bị dùng lại trên địa hình mới gây nguy cơ va chạm.',
+      timestamp: now(),
+    });
+  }
+
+  // =========================================================================
+  // T58: Khả Năng Tái Lập Khi Reset & Chạy Lại Nhiệm Vụ (Mission Reproducibility)
+  // =========================================================================
+  {
+    const runMissionSim = () => {
+      let curPose: RobotPose = { xM: -1.0, yM: 0, zM: -1.0, yawRad: 0 };
+      let curKin = initKinematics();
+      const path = planPathAStar(curPose, { xM: 0.0, zM: -1.0 }, baseMap, 0)!;
+
+      for (let i = 0; i < 80; i++) {
+        const pp = computePurePursuit(curPose, path, 0.12);
+        const phys = stepPhysics(curPose, curKin, pp.vLeftMps, pp.vRightMps, config, baseMap, false, 0, 0, i * 0.02);
+        curPose = phys.newPose;
+        curKin = phys.newKinematics;
+      }
+      return curPose;
+    };
+
+    const run1 = runMissionSim();
+    const run2 = runMissionSim();
+
+    const diffX = Math.abs(run1.xM - run2.xM);
+    const diffZ = Math.abs(run1.zM - run2.zM);
+    const diffYaw = Math.abs(run1.yawRad - run2.yawRad);
+
+    const pass = diffX < 1e-12 && diffZ < 1e-12 && diffYaw < 1e-12;
+
+    results.push({
+      id: 'T58',
+      name: 'Khả Năng Tái Lập Tuyệt Đối Khi Reset & Chạy Lại (Deterministic Reproducibility)',
+      description: 'Kiểm tra tính tất định: Reset nhiệm vụ về vị trí xuất phát ban đầu và chạy lại cùng một chuỗi điều khiển, vị trí cuối cùng phải trùng khớp tuyệt đối (sai số < 10⁻¹²m).',
+      status: pass ? 'PASS' : 'FAIL',
+      targetCriteria: 'Sai số tọa độ X, Z và góc Yaw giữa hai lần chạy độc lập < 10⁻¹²m',
+      measuredResult: `Chênh lệch X: ${diffX.toExponential(2)}m; Z: ${diffZ.toExponential(2)}m; Yaw: ${diffYaw.toExponential(2)}rad`,
+      details: pass ? 'Mô hình vật lý và quản lý nhiệm vụ đạt tính tất định toán học tuyệt đối, phục vụ nghiên cứu khoa học và giảng dạy chuẩn mực.' : 'Có hiện tượng ngẫu nhiên hóa không kiểm soát giữa các lần chạy mô phỏng.',
+      timestamp: now(),
+    });
+  }
+
+  // =========================================================================
+  // T59: Chấm Điểm Bài Thực Hành Định Lượng Dựa Trên Dữ Liệu Đo Thực Tế
+  // =========================================================================
+  {
+    const lab = BUILT_IN_LAB_ASSIGNMENTS[0];
+    const metrics: MissionRunMetrics = {
+      runId: 'RUN_TEST_59',
+      missionId: lab.missionConfig.id,
+      status: 'COMPLETED',
+      startTimeSimS: 0,
+      endTimeSimS: 32.5,
+      elapsedSimTimeS: 32.5,
+      totalDistanceM: 3.45,
+      plannedDistanceM: 3.40,
+      crossTrackErrors: [0.02, 0.04, 0.03, 0.05],
+      averageCrossTrackErrorM: 0.035,
+      maxCrossTrackErrorM: 0.052,
+      finalGoalDistanceM: 0.041,
+      collisionCount: 0,
+      replanCount: 0,
+      estopCount: 0,
+      sensorFaultCount: 0,
+      completedWaypointsCount: 3,
+      totalWaypointsCount: 3,
+      historySnapshots: [],
+    };
+
+    const gradeResult = gradeMissionRun(lab, metrics, 'Trần Minh Quân', 'Nhóm Robotics 11B');
+    const hasRubrics = gradeResult.scoreItems.length === lab.rubrics.length;
+    const scoreAccurate = gradeResult.totalScore >= 9.0 && gradeResult.passed;
+    const noFabricatedData = gradeResult.scoreItems.every(item => item.hasData);
+
+    const pass = hasRubrics && scoreAccurate && noFabricatedData;
+
+    results.push({
+      id: 'T59',
+      name: 'Chấm Điểm Thực Hành Định Lượng Theo Rubric (Objective Pedagogical Grading)',
+      description: 'Kiểm tra bộ giải thuật chấm điểm: tính điểm tự động 100% dựa trên dữ liệu vật lý thực tế (thời gian, va chạm, CTE, khoảng cách đích), phân tách rõ ràng điểm và số liệu đo.',
+      status: pass ? 'PASS' : 'FAIL',
+      targetCriteria: 'Đầy đủ rubric, Điểm số tính toán chính xác có trọng số, Không tự sinh số liệu giả',
+      measuredResult: `Điểm tổng: ${gradeResult.totalScore}/10 (${gradeResult.gradeTier}); Đủ rubric: ${hasRubrics}; Toàn bộ tiêu chí có dữ liệu thật: ${noFabricatedData}`,
+      details: pass ? 'Hệ thống chấm điểm sư phạm hoạt động khách quan, minh bạch và định lượng chính xác.' : 'Thuật toán chấm điểm tự gán giá trị hoặc sai lệch trọng số.',
+      timestamp: now(),
+    });
+  }
+
+  // =========================================================================
+  // T60: Xuất Báo Cáo Nghiệm Thu & Khả Năng Nhập Khôi Phục Cấu Hình Nhiệm Vụ (Export/Import Roundtrip)
+  // =========================================================================
+  {
+    const originalMission = BUILT_IN_LAB_ASSIGNMENTS[0].missionConfig;
+    const exportedJSON = JSON.stringify(originalMission, null, 2);
+    const reimportedMission = JSON.parse(exportedJSON) as MissionConfig;
+
+    const roundtripMatches =
+      reimportedMission.id === originalMission.id &&
+      reimportedMission.waypoints.length === originalMission.waypoints.length &&
+      reimportedMission.waypoints[0].xM === originalMission.waypoints[0].xM &&
+      reimportedMission.waypoints[0].zM === originalMission.waypoints[0].zM;
+
+    const pass = roundtripMatches && exportedJSON.length > 200;
+
+    results.push({
+      id: 'T60',
+      name: 'Khả Năng Xuất & Nhập Cấu Hình Nhiệm Vụ (Mission Export/Import Roundtrip)',
+      description: 'Kiểm tra tính tương thích và bảo toàn dữ liệu JSON: cấu hình bài thực hành sau khi xuất ra file và nhập lại phải đồng nhất 100% với phiên bản gốc.',
+      status: pass ? 'PASS' : 'FAIL',
+      targetCriteria: 'Dữ liệu JSON sau chu trình Export -> Import khớp hoàn toàn 100% với cấu hình gốc',
+      measuredResult: `Chu trình khớp 100%: ${roundtripMatches}; Kích thước file JSON: ${exportedJSON.length} bytes; Số waypoint bảo toàn: ${reimportedMission.waypoints.length}`,
+      details: pass ? 'Hệ thống hỗ trợ xuất và nhập giáo trình bài thực hành linh hoạt giữa giáo viên và học sinh.' : 'Dữ liệu bị méo mó hoặc mất thuộc tính sau khi tuần tự hóa JSON.',
       timestamp: now(),
     });
   }

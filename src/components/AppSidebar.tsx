@@ -16,6 +16,7 @@ import {
   Layers,
   Wrench,
   Radio,
+  Flag,
 } from 'lucide-react';
 
 export type NavigationTarget =
@@ -29,7 +30,8 @@ export type NavigationTarget =
   | 'camera_pov'
   | 'curriculum'
   | 'syllabus'
-  | 'telemetry_logs';
+  | 'telemetry_logs'
+  | 'mission_lab';
 
 interface AppSidebarProps {
   currentTarget: NavigationTarget;
@@ -89,6 +91,19 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
       ],
     },
     {
+      title: 'Nhiệm Vụ & Thực Hành',
+      items: [
+        {
+          id: 'mission_lab',
+          label: 'Nhiệm vụ & Lab',
+          vietnameseLabel: 'Multi-Waypoint & Chấm điểm Lab',
+          icon: Flag,
+          color: 'text-amber-500',
+          badge: 'Lab Pro',
+        },
+      ],
+    },
+    {
       title: 'Lập Trình & Kiểm Thử',
       items: [
         {
@@ -100,11 +115,11 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
         },
         {
           id: 'qa_tests',
-          label: 'Kiểm thử QA (T01-T18)',
-          vietnameseLabel: '18 Bài test định lượng',
+          label: 'Kiểm thử QA (T01-T60)',
+          vietnameseLabel: '60 Bài test định lượng',
           icon: ShieldCheck,
           color: 'text-teal-500',
-          badge: '18 Tests',
+          badge: '60 Tests',
         },
       ],
     },

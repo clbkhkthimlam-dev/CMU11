@@ -1,7 +1,7 @@
 import { runQuantitativeTests } from '../src/simulation/testRunner';
 
 async function main() {
-  console.log('=== CMU10 VERIFICATION, ENDURANCE, PERFORMANCE & READINESS SUITE (T01 - T50) ===\n');
+  console.log('=== CMU10 VERIFICATION, MULTI-WAYPOINT & ROBOTICS LAB SUITE (T01 - T60) ===\n');
   const results = await runQuantitativeTests();
   let passCount = 0;
   let failCount = 0;

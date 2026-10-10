@@ -1430,7 +1430,9 @@ function drawPlannedPathAndGoal(
 
     // Target Label Banner
     ctx.font = 'bold 11px "JetBrains Mono"';
-    const label = `ĐÍCH: (${autoNav.activeGoal.xM.toFixed(1)}, ${autoNav.activeGoal.zM.toFixed(1)})m`;
+    const label = autoNav.activeGoal.name
+      ? `${autoNav.activeGoal.name}: (${autoNav.activeGoal.xM.toFixed(1)}, ${autoNav.activeGoal.zM.toFixed(1)})m`
+      : `ĐÍCH: (${autoNav.activeGoal.xM.toFixed(1)}, ${autoNav.activeGoal.zM.toFixed(1)})m`;
     const tw = ctx.measureText(label).width;
     ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
     ctx.fillRect(gx - tw / 2 - 4, gy - 26, tw + 8, 18);
